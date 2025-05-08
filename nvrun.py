@@ -2,12 +2,14 @@
 import hashlib
 import json
 import os
+import re
 import sys
 import tty
 import termios
 import fcntl
 import textwrap
 import time
+import platform
 
 # 获取当前脚本所在目录
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -94,7 +96,7 @@ def find_best_page(pages, keyword, last_page):
         return matches_from_start[0]
 
     prompt = generate_prompt()
-    
+
     sys.stdout.write(f"\x1b[2K\r{prompt}未找到包含该关键词的内容(回车进入下一步)。\r")
     sys.stdout.flush()
 
@@ -103,10 +105,11 @@ def find_best_page(pages, keyword, last_page):
         if key in ('\n', '\r'):
             break
 
-    sys.stdout.write('\x1b[2K\r')  
+    sys.stdout.write('\x1b[2K\r')
     sys.stdout.flush()
 
     return None
+
 
 # 小说选择界面（只在一行显示切换的小说名）
 def select_novel_file(novel_dir):
@@ -116,10 +119,10 @@ def select_novel_file(novel_dir):
         sys.exit(1)
 
     selected_index = 0
-    prompt = generate_prompt()
 
     def redraw():
-        sys.stdout.write("\x1b[2K\r")  
+        prompt = generate_prompt()
+        sys.stdout.write("\x1b[2K\r")
         sys.stdout.write(f"{prompt}请选择一本小说（↑↓选择，回车确认，ESC退出）: {novels[selected_index]}\r")
         sys.stdout.flush()
 
@@ -134,10 +137,11 @@ def select_novel_file(novel_dir):
             redraw()
         elif key in ('\n', '\r'):
             return os.path.join(novel_dir, novels[selected_index])
-        elif key == 'ESC': 
+        elif key == 'ESC':
             safe_exit()
         elif key == 'b':
             pass
+
 
 # 获取按键事件
 def get_key():
@@ -171,34 +175,34 @@ def get_key():
 def input_single_line(prompt_text):
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
-
     try:
         new_settings = termios.tcgetattr(fd)
-        new_settings[3] &= ~termios.ECHO  
-        new_settings[3] &= ~termios.ICANON  
+        new_settings[3] &= ~termios.ECHO
+        new_settings[3] &= ~termios.ICANON
         termios.tcsetattr(fd, termios.TCSADRAIN, new_settings)
 
         user_input = []
 
-        sys.stdout.write(f"{generate_prompt()}{prompt_text}")
+        prompt = generate_prompt()
+        sys.stdout.write(f"{prompt}{prompt_text}")
         sys.stdout.flush()
 
         while True:
             char = sys.stdin.read(1)
 
-            if char == '\n' or char == '\r':  
+            if char == '\n' or char == '\r':
                 break
-            elif char == '\x7f' or char == '\x08':  
+            elif char == '\x7f' or char == '\x08':
                 if user_input:
                     user_input.pop()
-                    sys.stdout.write('\x08 \x08')  
+                    sys.stdout.write('\x08 \x08')
                     sys.stdout.flush()
-            elif ord(char) == 3:  
+            elif ord(char) == 3:
                 raise KeyboardInterrupt
-            elif ord(char) == 27:  
-                safe_exit()  
+            elif ord(char) == 27:
+                safe_exit()
             elif char == 'b':
-                sys.stdout.write('\x1b[2K\r')  
+                sys.stdout.write('\x1b[2K\r')
                 return 'b'
             elif char.isprintable():
                 user_input.append(char)
@@ -207,39 +211,94 @@ def input_single_line(prompt_text):
 
         result = ''.join(user_input)
 
-        sys.stdout.write('\x1b[2K\r') 
+        sys.stdout.write('\x1b[2K\r')
         sys.stdout.flush()
         return result
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
-# 提示符生成函数
+
+# 计算颜色占用的长度
+def visible_length(s):
+    """计算去除所有 ANSI 转义序列后的字符串长度"""
+    ansi_escape = re.compile(r'\x1b\[[0-9;]*m')
+    return len(ansi_escape.sub('', s))
+
+
+def read_bashrc_ps1():
+    """
+    读取 ~/.bashrc 文件，解析出 PS1 的值
+    """
+    bashrc_path = os.path.expanduser("~/.bashrc")
+    if not os.path.exists(bashrc_path):
+        return None
+    with open(bashrc_path, 'r') as f:
+        content = f.read()
+    # 匹配 PS1 的设置
+    match = re.search(r"PS1='([^']+)'", content)
+    if match:
+        ps1 = match.group(1)
+        return ps1
+    return None
+
+
+def parse_ps1_colors(ps1):
+    # 匹配 \[\033[xxm\] 这种格式
+    color_pattern = r'\\\[\\033\[([0-9;]+)m\\\]'
+    matches = re.findall(color_pattern, ps1)
+    colors = []
+    for match in matches:
+        colors.append(f'\033[{match}m')
+    return colors
+
+
 def generate_prompt():
     username = os.getenv('USER', 'root')
     hostname = os.uname().nodename
-
-    # 简化 localhost.localdomain → localhost
-    if hostname.startswith('localhost'):
-        hostname = 'localhost'
-
-    pwd = os.path.basename(os.getcwd())
-
-    # 如果当前用户是 root，并且路径是 /root，则显示为 ~
-    if username == 'root' and pwd == 'root' and os.getcwd() == '/root':
+    pwd = os.getcwd()
+    home_dir = os.path.expanduser("~")
+    if pwd.startswith(home_dir):
+        pwd = "~" + pwd[len(home_dir):]
+    if username == 'root' and pwd == '/root':
         pwd = '~'
 
-    # 根据是否为 root 用户选择提示符结尾
     prompt_char = '#' if os.geteuid() == 0 else '$'
 
-    return f"[{username}@{hostname} {pwd}]{prompt_char} "
+    os_info = platform.system()
+
+    if os_info == 'Linux':
+        try:
+            with open('/etc/os-release') as f:
+                for line in f:
+                    if line.startswith('ID='):
+                        distro = line.split('=')[1].strip().strip('"')
+                        break
+                if distro == 'ubuntu':
+                    ps1 = read_bashrc_ps1()
+                    if ps1:
+                        colors = parse_ps1_colors(ps1)
+                        if len(colors) >= 2:
+                            color_user_host = colors[0]
+                            color_path = colors[2]  # 这里根据实际情况调整索引
+                            reset_color = '\033[00m'
+                            prompt = f"{color_user_host}{username}@{hostname}{reset_color}:{color_path}{pwd}{reset_color}{prompt_char} "
+                            return prompt
+        except FileNotFoundError:
+            pass
+
+    return f"[{username}@{hostname} {os.path.basename(pwd)}]{prompt_char} "
+
 
 # 分页处理函数
 def prepare_pages(novel_lines):
     _, cols = os.get_terminal_size()
-    prompt_len = len(generate_prompt())
+    prompt = generate_prompt()
+    # 使用 visible_length 来计算提示符的实际文本长度
+    prompt_len = visible_length(prompt)
 
     pages = []
     for line in novel_lines:
+        # 注意：这里不需要额外增加颜色代码的长度，因为我们关注的是最终输出的可见部分
         parts = textwrap.wrap(line, width=cols - prompt_len)
         if not parts:
             continue
@@ -266,8 +325,6 @@ def main():
 
         last_page = load_progress(novel_file)
         current_page = last_page if last_page is not None and last_page < len(pages) else 0
-        # === prompt 提前定义 ===
-        prompt = generate_prompt()
 
         # === 单行交互式菜单 ===
         operation_menu_loop = True
@@ -284,6 +341,7 @@ def main():
                 # 进入主阅读循环
                 try:
                     while True:
+                        prompt = generate_prompt()
                         sys.stdout.write("\x1b[2K\r")  # 清空当前行
                         sys.stdout.write(f"{prompt}{pages[current_page]}\r")
                         sys.stdout.flush()
@@ -318,6 +376,7 @@ def main():
                     # 进入主阅读循环
                     try:
                         while True:
+                            prompt = generate_prompt()
                             sys.stdout.write("\x1b[2K\r")  # 清空当前行
                             sys.stdout.write(f"{prompt}{pages[current_page]}\r")
                             sys.stdout.flush()
@@ -340,6 +399,7 @@ def main():
                         save_progress(novel_file, current_page)
                         safe_exit()
             else:
+                prompt = generate_prompt()
                 sys.stdout.write(f"\x1b[2K\r{prompt}输入无效，请重新选择。\r")
                 sys.stdout.flush()
                 time.sleep(0.6)
